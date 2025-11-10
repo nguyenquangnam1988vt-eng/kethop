@@ -1,4 +1,3 @@
-// lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
@@ -13,12 +12,13 @@ void main() {
   runApp(const MyApp());
 }
 
-// --- Mô hình Dữ liệu ---
+// --- Mô hình Dữ liệu (ĐÃ CẬP NHẬT) ---
 class MonitorEvent {
-  final String type; // 'LOCK_EVENT' hoặc 'TILT_EVENT'
+  final String type; // 'LOCK_EVENT', 'TILT_EVENT', 'UNLOCK_EVENT', 'ALARM_EVENT'
   final String message;
   final String? location;
   final double? tiltValue;
+  final double? oscillationValue; // [MỚI] Giá trị dao động (ổn định)
   final DateTime timestamp;
 
   MonitorEvent({
@@ -26,6 +26,7 @@ class MonitorEvent {
     required this.message,
     this.location,
     this.tiltValue,
+    this.oscillationValue, // [MỚI]
     required this.timestamp,
   });
 
@@ -34,9 +35,10 @@ class MonitorEvent {
       type: json['type'] as String,
       message: json['message'] as String,
       location: json['location'] as String?,
-      // FIX LỖI: Xử lý an toàn cho tiltValue (num -> double)
       tiltValue: (json['tiltValue'] as num?)?.toDouble(),
-      timestamp: DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int),
+      oscillationValue: (json['oscillationValue'] as num?)?.toDouble(), // [MỚI]
+      // FIX: Swift gửi timestamp là Double (mili giây), phải parse là num và chuyển thành int
+      timestamp: DateTime.fromMillisecondsSinceEpoch((json['timestamp'] as num).toInt()),
     );
   }
 }
@@ -49,16 +51,11 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Unlock & Tilt Monitor',
       theme: ThemeData(
-        // Thiết lập chủ đề tối (Dark Theme) làm mặc định
         brightness: Brightness.dark,
         primarySwatch: Colors.blue,
-        scaffoldBackgroundColor: const Color(0xFF121212), // Màu nền tối
-        cardColor: const Color(0xFF1E1E1E), // Màu nền thẻ
-        
-        // FIX LỖI: Thay thế Typography.white bằng ThemeData.dark().textTheme
-        // Đảm bảo tương thích trên mọi nền tảng
+        scaffoldBackgroundColor: const Color(0xFF121212),
+        cardColor: const Color(0xFF1E1E1E),
         textTheme: ThemeData.dark().textTheme.apply(fontFamily: 'Roboto'),
-        
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF1F1F1F),
           foregroundColor: Colors.white,
@@ -86,16 +83,15 @@ class _MonitorScreenState extends State<MonitorScreen> {
   MonitorEvent? _latestTiltEvent;
   String _connectionStatus = "Đang chờ kết nối...";
   
-  // --- BIẾN MỚI ---
-  bool _isMonitoringActive = false; // Trạng thái Bắt đầu/Dừng theo dõi
-  bool _isScreenLocked = true; // Mặc định là Khóa (Locked)
+  bool _isMonitoringActive = false;
+  bool _isScreenLocked = true;
   String? _warningStatus; // Cảnh báo vi phạm (null nếu không có)
   StreamSubscription? _eventSubscription;
 
   @override
   void initState() {
     super.initState();
-    // Bắt đầu lắng nghe sự kiện khi ứng dụng chạy lần đầu
+    // Khởi động theo dõi ngay khi widget được tạo
     _toggleMonitoring(); 
   }
 
@@ -106,20 +102,20 @@ class _MonitorScreenState extends State<MonitorScreen> {
     });
 
     if (_isMonitoringActive) {
-      // 1. Gửi lệnh BẮT ĐẦU SERVICE NỀN đến Native (iOS)
       try {
+        // Gửi lệnh BẮT ĐẦU SERVICE NỀN đến Native (iOS)
         await _methodChannel.invokeMethod('startBackgroundService');
         _startListeningToEvents();
         setState(() => _connectionStatus = "Đã bắt đầu theo dõi và kết nối.");
       } on PlatformException catch (e) {
         setState(() {
-          _isMonitoringActive = false; // Thất bại thì dừng lại
+          _isMonitoringActive = false;
           _connectionStatus = "Lỗi khi bắt đầu dịch vụ nền: ${e.message}";
         });
       }
     } else {
-      // 2. Gửi lệnh DỪNG SERVICE NỀN đến Native (iOS)
       try {
+        // Gửi lệnh DỪNG SERVICE NỀN đến Native (iOS)
         await _methodChannel.invokeMethod('stopBackgroundService');
         _stopListeningToEvents();
         setState(() => _connectionStatus = "Đã dừng theo dõi.");
@@ -130,7 +126,6 @@ class _MonitorScreenState extends State<MonitorScreen> {
   }
 
   void _startListeningToEvents() {
-    // Ngăn chặn việc đăng ký lắng nghe nhiều lần
     _eventSubscription?.cancel();
 
     _eventSubscription = _eventChannel.receiveBroadcastStream().listen(
@@ -143,51 +138,39 @@ class _MonitorScreenState extends State<MonitorScreen> {
   void _stopListeningToEvents() {
     _eventSubscription?.cancel();
     _eventSubscription = null;
-  }
-
-  // --- LOGIC XỬ LÝ SỰ KIỆN VÀ CẢNH BÁO ---
-  void _checkAndSetWarning() {
-    // Điều kiện CẢNH BÁO (VI PHẠM):
-    // 1. Theo dõi đang BẬT (_isMonitoringActive)
-    // 2. Màn hình đang MỞ (!_isScreenLocked)
-    // 3. Góc nghiêng (tiltValue) < 70% (khoảng 0.7 radians)
-    // 4. Góc nghiêng (tiltValue) < 1.5 (dao động thấp, tức là thiết bị ổn định)
-    
-    if (_isMonitoringActive && !_isScreenLocked) {
-      final double currentTilt = (_latestTiltEvent?.tiltValue ?? 0.0).abs();
-      
-      // Giả sử 70% tilt value là 0.7 radians (do góc nghiêng thường đo bằng radians)
-      const double TILT_THRESHOLD = 0.7; 
-      const double Z_FLUCTUATION_THRESHOLD = 1.5; // Giả sử đây là ngưỡng ổn định
-      
-      if (currentTilt < TILT_THRESHOLD && currentTilt < Z_FLUCTUATION_THRESHOLD) {
-        // Nếu thiết bị được MỞ KHÓA và đang ở trạng thái KHÁ PHẲNG/ỔN ĐỊNH
-        _warningStatus = 'CẢNH BÁO VI PHẠM: Thiết bị mở khóa & Ổn Định (${currentTilt.toStringAsFixed(3)} rad)';
-      } else {
-        _warningStatus = null;
-      }
-    } else {
+    // Khi dừng, xóa trạng thái cảnh báo
+    setState(() {
       _warningStatus = null;
-    }
+    });
   }
 
+  // --- LOGIC XỬ LÝ SỰ KIỆN VÀ CẢNH BÁO (ĐÃ ĐƠN GIẢN HÓA) ---
   void _onEvent(dynamic event) {
     setState(() {
       _connectionStatus = "Đã kết nối";
       try {
         final Map<String, dynamic> data = jsonDecode(event as String);
         final monitorEvent = MonitorEvent.fromJson(data);
+        
+        // Reset cảnh báo nếu không phải là sự kiện ALARM
+        if (monitorEvent.type != 'ALARM_EVENT') {
+          _warningStatus = null;
+        }
 
         if (monitorEvent.type == 'TILT_EVENT') {
           _latestTiltEvent = monitorEvent;
         } else {
+          // Xử lý LOCK, UNLOCK, và ALARM EVENTS
           _historyEvents.insert(0, monitorEvent);
+          
           // CẬP NHẬT TRẠNG THÁI KHÓA MÀN HÌNH
-          _isScreenLocked = !monitorEvent.message.contains('Mở Khóa');
+          _isScreenLocked = !(monitorEvent.type == 'UNLOCK_EVENT' || monitorEvent.type == 'ALARM_EVENT');
+          
+          // XỬ LÝ SỰ KIỆN CẢNH BÁO (ALARM_EVENT)
+          if (monitorEvent.type == 'ALARM_EVENT') {
+            _warningStatus = 'ALARM KÍCH HOẠT: ${monitorEvent.message}';
+          }
         }
-        
-        // KIỂM TRA CẢNH BÁO sau khi cập nhật dữ liệu mới
-        _checkAndSetWarning();
 
       } catch (e) {
         _connectionStatus = "Lỗi phân tích JSON: $e";
@@ -212,7 +195,6 @@ class _MonitorScreenState extends State<MonitorScreen> {
   @override
   void dispose() {
     _stopListeningToEvents();
-    // Đảm bảo MethodChannel được gọi để dừng service nếu đang chạy
     if (_isMonitoringActive) {
       _methodChannel.invokeMethod('stopBackgroundService').catchError((e) {
         print('Error stopping background service on dispose: $e');
@@ -243,7 +225,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
                   fontWeight: FontWeight.bold,
                   color: Colors.white,
                 ),
-                maxLines: 2,
+                maxLines: 4, // Tăng maxLines để hiển thị toàn bộ tin nhắn Alarm
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -285,20 +267,21 @@ class _MonitorScreenState extends State<MonitorScreen> {
     );
   }
 
-  // Tạo thẻ hiển thị dữ liệu Tilt mới nhất
+  // Tạo thẻ hiển thị dữ liệu Tilt mới nhất (ĐÃ CẬP NHẬT)
   Widget _buildTiltMonitorCard() {
     final double tiltValue = _latestTiltEvent?.tiltValue ?? 0.0;
+    final double oscillationValue = _latestTiltEvent?.oscillationValue ?? 0.0;
     final String tiltMessage = _latestTiltEvent?.message ?? 'Chờ dữ liệu...';
     
     // Tính toán màu sắc dựa trên giá trị nghiêng
     Color tiltColor = Colors.grey;
-    if (tiltValue.abs() > 0.05) {
+    if (tiltValue.abs() > 0.3) {
       tiltColor = Colors.yellow.shade700;
     }
-    if (tiltValue.abs() > 0.1) {
+    if (tiltValue.abs() > 0.8) {
       tiltColor = Colors.orange.shade700;
     }
-    if (tiltValue.abs() > 0.2) {
+    if (tiltValue.abs() > 1.2) { // Gần ngưỡng 70 độ (1.22 rad)
       tiltColor = Colors.red.shade700;
     }
 
@@ -314,7 +297,6 @@ class _MonitorScreenState extends State<MonitorScreen> {
               children: [
                 Icon(Icons.screen_rotation, color: tiltColor, size: 30),
                 const SizedBox(width: 10),
-                // Fix cho TextTheme
                 Text(
                   'Cảm Biến Nghiêng (Gia Tốc Kế)',
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.white, fontWeight: FontWeight.bold),
@@ -323,8 +305,13 @@ class _MonitorScreenState extends State<MonitorScreen> {
             ),
             const Divider(color: Colors.white10, height: 20),
             Text(
-              'Góc Nghiêng Hiện Tại (Z-Axis): ${tiltValue.toStringAsFixed(3)} radians',
+              'Góc Nghiêng TB 5s (Roll): ${tiltValue.toStringAsFixed(3)} radians',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: tiltColor),
+            ),
+            const SizedBox(height: 8),
+             Text( // [MỚI] Hiển thị Độ Dao Động (Ổn Định)
+              'Độ Dao Động (Ổn Định): ${oscillationValue.toStringAsFixed(5)} radians',
+              style: const TextStyle(fontSize: 14, color: Colors.white70),
             ),
             const SizedBox(height: 8),
             Text(
@@ -342,24 +329,37 @@ class _MonitorScreenState extends State<MonitorScreen> {
     );
   }
 
-  // Tạo Tile hiển thị sự kiện Lock/Unlock
+  // Tạo Tile hiển thị sự kiện Lock/Unlock (Hỗ trợ ALARM_EVENT)
   Widget _buildLockUnlockTile(MonitorEvent event) {
-    final bool isUnlocked = event.message.contains('Mở Khóa');
-    final Color eventColor = isUnlocked ? Colors.green.shade400 : Colors.red.shade400;
-    final IconData icon = isUnlocked ? Icons.lock_open : Icons.lock;
+    final bool isAlarm = event.type == 'ALARM_EVENT';
+    final bool isUnlocked = event.type.contains('UNLOCK') || isAlarm;
+    
+    Color eventColor;
+    IconData icon;
+    if (isAlarm) {
+      eventColor = Colors.red.shade800;
+      icon = Icons.error_outline;
+    } else if (isUnlocked) {
+      eventColor = Colors.green.shade400;
+      icon = Icons.lock_open;
+    } else {
+      eventColor = Colors.red.shade400;
+      icon = Icons.lock;
+    }
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4.0),
       elevation: 2,
+      color: isAlarm ? Colors.red.shade900.withOpacity(0.2) : Theme.of(context).cardColor,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: eventColor.withOpacity(0.3), width: 1),
+        side: BorderSide(color: eventColor.withOpacity(0.6), width: 1.5),
       ),
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
         leading: Icon(icon, color: eventColor, size: 32),
         title: Text(
-          event.message,
+          isAlarm ? 'CẢNH BÁO VI PHẠM' : (isUnlocked ? 'THIẾT BỊ MỞ KHÓA' : 'THIẾT BỊ KHÓA'),
           style: TextStyle(
             fontWeight: FontWeight.bold,
             color: eventColor,
@@ -369,8 +369,13 @@ class _MonitorScreenState extends State<MonitorScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
+              'Chi tiết: ${event.message}',
+              style: TextStyle(color: isAlarm ? Colors.white : Colors.white70),
+            ),
+            const SizedBox(height: 4),
+            Text(
               'Thời gian: ${event.timestamp.toString().substring(0, 19)}',
-              style: const TextStyle(color: Colors.white70),
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
             ),
             if (event.location != null)
               Text(
@@ -385,8 +390,6 @@ class _MonitorScreenState extends State<MonitorScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Sử dụng headline6 (đã bị deprecate) thay bằng titleLarge để tránh cảnh báo, 
-    // nhưng giữ nguyên styling tương đương nếu được
     final titleStyle = Theme.of(context).textTheme.titleLarge;
     
     return Scaffold(
@@ -462,7 +465,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
             child: Padding(
               padding: const EdgeInsets.only(left: 16.0, right: 16.0, top: 10.0, bottom: 8.0),
               child: Text(
-                'Lịch Sử Sự Kiện (Lock/Unlock)',
+                'Lịch Sử Sự Kiện (Lock/Unlock/Alarm)',
                 style: titleStyle?.copyWith(color: Colors.blueAccent),
               ),
             ),
@@ -475,7 +478,7 @@ class _MonitorScreenState extends State<MonitorScreen> {
                     child: Padding(
                       padding: const EdgeInsets.all(32.0),
                       child: Text(
-                        'Chưa có sự kiện Lock/Unlock nào được ghi lại.',
+                        'Chưa có sự kiện Lock/Unlock/Alarm nào được ghi lại.',
                         style: TextStyle(color: Colors.white70, fontSize: 16),
                         textAlign: TextAlign.center,
                       ),
