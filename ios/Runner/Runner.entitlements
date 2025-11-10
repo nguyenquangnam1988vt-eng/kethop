@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Entitlement này cho phép ứng dụng của bạn chạy các tác vụ nền (background mode). -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <!-- Giá trị 'location' là BẮT BUỘC. 
+             Nó cho phép ứng dụng được đánh thức khi có sự thay đổi vị trí đáng kể (Significant Location Change), 
+             đây là cách chúng ta theo dõi sự kiện Mở khóa màn hình trong nền. -->
+        <string>location</string>
+    </array>
+    
+    <!-- Entitlement này cần cho Push Notifications. Dù không dùng trực tiếp cho Location/Motion, 
+         nó thường được bật trong các ứng dụng nền. Bạn có thể giữ hoặc xóa nếu không dùng Push. -->
+    <key>aps-environment</key>
+    <string>production</string>
+</dict>
+</plist>

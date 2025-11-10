@@ -1,0 +1,55 @@
+name: app5
+description: "Ứng dụng theo dõi trạng thái Mở Khóa, Nghiêng và Vị trí của thiết bị."
+# The following line prevents the package from being accidentally published to
+# pub.dev using `flutter pub publish`. This is preferred for private packages.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0" # Cập nhật SDK environment
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Thư viện cho giao diện và icon
+  cupertino_icons: ^1.0.8
+
+  # --- Thư viện từ dự án Driver Phone Monitor ---
+  
+  # Lấy dữ liệu cảm biến (ví dụ: gia tốc kế cho tính năng nghiêng)
+  sensors_plus: ^5.0.0 
+  
+  # Lấy dữ liệu vị trí GPS (Quan trọng cho CoreLocation/geolocator)
+  geolocator: ^14.0.2
+  
+  # Quản lý quyền truy cập (Quan trọng cho Location và Motion)
+  permission_handler: ^11.0.0
+  
+  # Hỗ trợ rung
+  vibration: ^1.7.4
+  
+  # Hiển thị thông báo cục bộ (cần cho cảnh báo)
+  flutter_local_notifications: ^13.0.0
+  
+  # Phát âm thanh cảnh báo
+  audioplayers: ^5.2.1 
+  
+  # Theo dõi trạng thái màn hình (Quan trọng cho Lock/Unlock)
+  screen_state: ^4.1.1 
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0 # Sử dụng version 2.0.0 cho SDK 3.0.0+
+
+# For information on the generic Dart part of this file, see the
+# following page: https://dart.dev/tools/pub/pubspec
+
+flutter:
+  uses-material-design: true
+
+  # Asset âm thanh cho audioplayers
+  assets:
+    - assets/alert.mp3
