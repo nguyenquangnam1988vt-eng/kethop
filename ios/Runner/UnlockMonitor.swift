@@ -8,9 +8,7 @@ import UserNotifications
 let kScreenLockStateNotification = "com.apple.springboard.lockstate"
 
 // --- HẰNG SỐ KIỂM TRA ĐỘ ỔN ĐỊNH VÀ NGHIÊNG (ĐÃ CẬP NHẬT THEO YÊU CẦU) ---
-// Yêu cầu: Góc nghiêng làm mịn VƯỢT QUÁ 70 độ để cảnh báo
 let TILT_THRESHOLD: Double = 1.2217 // 70 degrees in radians (70 * pi/180)
-// Yêu cầu: Thiết bị đang ổn định, tức độ dao động DƯỚI 1.5 độ (Max Roll - Min Roll in buffer)
 let OSCILLATION_LIMIT: Double = 0.026 // ~1.5 degrees in radians 
 
 let TILT_UPDATE_INTERVAL = 0.02 // 50 Hz (20ms)
@@ -27,7 +25,8 @@ struct MonitorEvent: Codable {
     
     var jsonString: String {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = .compact
+        // Đã sửa lỗi: 'Type 'JSONEncoder.OutputFormatting' has no member 'compact''. 
+        // Bỏ qua outputFormatting; mặc định đã là compact.
         if let data = try? encoder.encode(self), let json = String(data: data, encoding: .utf8) {
             return json
         }
@@ -61,7 +60,11 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
     private override init() {
         super.init()
         locationManager.delegate = self
-        locationManager.desiredAccuracy = kCLLOCATIONAccuracyBestForNavigation
+        
+        // Đã sửa lỗi: Cannot find 'kCLLOCATIONAccuracyBestForNavigation' in scope
+        // Dùng enum case của Swift thay vì hằng số C
+        locationManager.desiredAccuracy = .bestForNavigation 
+        
         locationManager.requestAlwaysAuthorization()
         
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
@@ -85,6 +88,7 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
         return nil
     }
     
+    // Phương thức này được AppDelegate gọi
     func setupEventChannel(binaryMessenger: FlutterBinaryMessenger) {
         let eventChannel = FlutterEventChannel(name: "com.example.app/monitor_events", binaryMessenger: binaryMessenger)
         eventChannel.setStreamHandler(self)
@@ -123,15 +127,18 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
             .deliverImmediately
         )
         print("[LockState] Bắt đầu lắng nghe Darwin Notification.")
+        
+        // Gọi để kiểm tra trạng thái khóa ban đầu ngay sau khi thiết lập lắng nghe
         handleLockStateChange()
     }
     
     // Hàm xử lý sự kiện Lock/Unlock (Bao gồm logic cảnh báo đã cập nhật)
     private func handleLockStateChange() {
-        let cfNotificationName = CFNotificationName(kScreenLockStateNotification as CFString)
-        let cfNotification = CFNotificationCenterGetState(CFNotificationCenterGetDarwinNotifyCenter(), cfNotificationName)
         
-        let currentState = (cfNotification == 0) ? "UNLOCKED" : "LOCKED"
+        // Đã sửa lỗi: Cannot find 'CFNotificationCenterGetState' in scope
+        // Thay thế hàm C private bằng API công khai của Swift để kiểm tra Protected Data
+        let isProtectedDataAvailable = UIApplication.shared.isProtectedDataAvailable
+        let currentState = isProtectedDataAvailable ? "UNLOCKED" : "LOCKED"
         
         if currentState != latestLockState || latestLockState == "UNKNOWN" {
             latestLockState = currentState
@@ -140,7 +147,6 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
             var message: String
             
             let rollForCheck = self.smoothedRollAngle // Góc nghiêng TRUNG BÌNH 5s
-            // isOscillating = TRUE nếu dao động VƯỢT QUÁ giới hạn 1.5 độ
             let isOscillating = self.oscillationValue > OSCILLATION_LIMIT 
             
             if currentState == "UNLOCKED" {
@@ -174,8 +180,8 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
                 type: eventType,
                 message: message,
                 location: self.getLatestLocationString(), 
-                tiltValue: self.smoothedRollAngle, // Góc nghiêng trung bình tại thời điểm sự kiện
-                oscillationValue: self.oscillationValue, // Độ dao động tại thời điểm sự kiện
+                tiltValue: self.smoothedRollAngle, 
+                oscillationValue: self.oscillationValue, 
                 timestamp: Int(Date().timeIntervalSince1970 * 1000)
             )
             self.eventSink?(event.jsonString)
@@ -239,13 +245,12 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
             return
         }
         
-        // Thiết lập tần suất lấy mẫu cao (50Hz)
         motionManager.deviceMotionUpdateInterval = TILT_UPDATE_INTERVAL
         
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] (motion, error) in
             guard let self = self, let attitude = motion?.attitude else { return }
             
-            // 1. Cập nhật buffer (Luôn thêm mẫu mới và xóa mẫu cũ để duy trì kích thước 5s)
+            // 1. Cập nhật buffer
             self.tiltBuffer.append(attitude.roll)
             if self.tiltBuffer.count > TILT_BUFFER_SIZE {
                 self.tiltBuffer.removeFirst()

@@ -1,12 +1,12 @@
 import UIKit
 import Flutter
-import CoreLocation // Cần thiết cho Core Location Manager trong UnlockMonitor
-import CoreMotion // Cần thiết cho Core Motion trong UnlockMonitor
+import CoreLocation 
+import CoreMotion 
 
 @UIApplicationMain
 class AppDelegate: FlutterAppDelegate {
     
-    // Sử dụng class UnlockMonitor mới
+    // Sử dụng Singleton đã được khởi tạo
     private let monitor = UnlockMonitor.shared
     
     override func application(
@@ -19,12 +19,12 @@ class AppDelegate: FlutterAppDelegate {
         
         // BƯỚC 2: Khởi tạo và Thiết lập Kênh Truyền thông cho UnlockMonitor
         if let controller = window?.rootViewController as? FlutterViewController {
-            // Thiết lập kênh truyền thông
-            monitor.setupFlutterChannel(binaryMessenger: controller.binaryMessenger)
+            // Đã sửa lỗi: Tên phương thức phải là setupEventChannel
+            monitor.setupEventChannel(binaryMessenger: controller.binaryMessenger)
         }
         
-        // BƯỚC 3: Bắt đầu theo dõi (monitor sẽ bắt đầu cả Unlock và Tilt)
-        monitor.startMonitoring()
+        // BƯỚC 3: Loại bỏ monitor.startMonitoring()
+        // Việc giám sát (monitoring) sẽ tự động bắt đầu khi Flutter gọi monitor.onListen()
         
         // BƯỚC 4: Trả về kết quả
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
