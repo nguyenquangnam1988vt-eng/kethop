@@ -1,51 +1,57 @@
 import UIKit
 import Flutter
+import CoreMotion
+import CoreLocation
 
-// Khai báo tên kênh (đã được định nghĩa trong UnlockMonitor.swift, nhưng cần có sẵn ở đây)
+// MARK: - Flutter Channel Constants
+// Khai báo các hằng số kênh tại đây VÀ CHỈ TẠI ĐÂY để tránh lỗi redeclaration.
 let eventChannelName = "com.example.app/monitor_events"
 let methodChannelName = "com.example.app/background_service"
 
-@UIApplicationMain
-@objc class AppDelegate: FlutterAppDelegate {
-  override func application(
-    _ application: UIApplication,
-    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
-  ) -> Bool {
-    // Đăng ký các plugin được tạo tự động của Flutter
-    GeneratedPluginRegistrant.register(with: self)
-
-    // Lấy FlutterViewController, nơi chứa binaryMessenger (dùng để tạo kênh)
-    guard let controller = window?.rootViewController as? FlutterViewController else {
-        fatalError("rootViewController is not FlutterViewController")
-    }
-
-    // 1. Khởi tạo UnlockMonitor
-    // Lớp này chứa logic theo dõi cảm biến, vị trí và xử lý sự kiện stream
-    let monitor = UnlockMonitor()
-
-    // 2. Thiết lập MethodChannel (Giao tiếp một chiều: Dart gọi Swift)
-    let methodChannel = FlutterMethodChannel(name: methodChannelName, binaryMessenger: controller.binaryMessenger)
-    methodChannel.setMethodCallHandler { (call: FlutterMethodCall, result: @escaping FlutterResult) in
-        
-        // Xử lý các lệnh gọi từ Dart
-        if call.method == "startBackgroundService" {
-            monitor.startMonitoring()
-            result(nil)
-        } else if call.method == "stopBackgroundService" {
-            monitor.stopMonitoring()
-            result(nil)
-        } else {
-            result(FlutterMethodNotImplemented)
-        }
-    }
-
-    // 3. Thiết lập EventChannel (Giao tiếp stream: Swift gửi data liên tục về Dart)
-    let eventChannel = FlutterEventChannel(name: eventChannelName, binaryMessenger: controller.binaryMessenger)
+@main
+class AppDelegate: FlutterAppDelegate {
     
-    // Đặt 'monitor' làm handler cho stream. Khi Dart lắng nghe, monitor.onListen sẽ được gọi.
-    // Khi Dart dừng lắng nghe, monitor.onCancel sẽ được gọi.
-    eventChannel.setStreamHandler(monitor)
+    // Cấu hình UnlockMonitor
+    private var unlockMonitor: UnlockMonitor?
 
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-  }
+    override func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+        
+        // Setup Flutter View Controller
+        guard let controller = window?.rootViewController as? FlutterViewController else {
+            return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+        }
+        
+        // Khởi tạo Monitor
+        unlockMonitor = UnlockMonitor()
+
+        // Setup Method Channel: Gọi các hàm điều khiển từ Flutter (start/stop)
+        let methodChannel = FlutterMethodChannel(name: methodChannelName, binaryMessenger: controller.binaryMessenger)
+        methodChannel.setMethodCallHandler { [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) in
+            guard let self = self, let monitor = self.unlockMonitor else {
+                result(FlutterError(code: "UNAVAILABLE", message: "Monitor service not ready", details: nil))
+                return
+            }
+            
+            switch call.method {
+            case "startMonitoring":
+                monitor.startMonitoring()
+                result(nil)
+            case "stopMonitoring":
+                monitor.stopMonitoring()
+                result(nil)
+            default:
+                result(FlutterMethodNotImplemented)
+            }
+        }
+
+        // Setup Event Channel: Gửi sự kiện từ Native (Lock/Unlock/Alarm/Tilt) về Flutter
+        let eventChannel = FlutterEventChannel(name: eventChannelName, binaryMessenger: controller.binaryMessenger)
+        eventChannel.setStreamHandler(unlockMonitor)
+
+        GeneratedPluginRegistrant.register(with: self)
+        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    }
 }

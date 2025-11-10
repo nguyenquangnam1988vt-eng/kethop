@@ -6,10 +6,6 @@ import UIKit
 
 // MARK: - Constants and Structs
 
-// Định nghĩa tên kênh Flutter
-let eventChannelName = "com.example.app/monitor_events"
-let methodChannelName = "com.example.app/background_service"
-
 // Ngưỡng nghiêng (độ) - Khoảng 70 độ.
 let TILT_THRESHOLD_DEGREE: Double = 70.0
 let TILT_THRESHOLD_RAD: Double = TILT_THRESHOLD_DEGREE * .pi / 180.0
@@ -151,16 +147,17 @@ class UnlockMonitor: NSObject, FlutterStreamHandler, CLLocationManagerDelegate {
         if motionManager.isDeviceMotionAvailable {
             motionManager.deviceMotionUpdateInterval = 0.05 // 50ms
 
-            // SỬA LỖI: Sử dụng Reference Frame đúng và cung cấp OperationQueue
+            // KHẮC PHỤC LỖI: Sử dụng CMAttitudeReferenceFrame.xArbitraryCorrectedZAxis 
             motionManager.startDeviceMotionUpdates(
-                using: .xArbitraryZAxis, // Tên Reference Frame đúng
-                to: OperationQueue.main // OperationQueue BẮT BUỘC
+                using: .xArbitraryCorrectedZAxis, 
+                to: OperationQueue.main
             ) { [weak self] (motion, error) in
                 guard let self = self, let motion = motion else { return }
 
                 let rollAngle = motion.attitude.roll
                 self.processTiltData(rollAngle: rollAngle)
 
+                // Vô cùng quan trọng: Luôn kiểm tra cảnh báo sau khi nhận dữ liệu cảm biến mới
                 self.checkAlarmConditions()
             }
         } else {
@@ -216,18 +213,19 @@ class UnlockMonitor: NSObject, FlutterStreamHandler, CLLocationManagerDelegate {
         sendEvent(type: "UNLOCK_EVENT", message: "Thiết bị đã Mở Khóa (Proxy: Ứng dụng hoạt động).", location: lastLocation?.toLocationString())
     }
 
-    // MARK: - Alarm Logic
+    // MARK: - Alarm Logic (Logic CẢNH BÁO)
 
     private func checkAlarmConditions() {
         guard isMonitoringTilt else { return }
 
-        // ALARM: Thiết bị Mở Khóa, Phẳng, và Rất Ổn Định.
+        // CẢNH BÁO: Kích hoạt khi thiết bị được coi là Mở Khóa (proxy) VÀ nằm Rất Phẳng VÀ Rất Ổn Định (Low Oscillation)
         if !isScreenLocked {
-            let tiltLow = abs(lastTiltValue) < TILT_THRESHOLD_RAD * 0.1
-            let oscillationLow = lastOscillationValue < OSCILLATION_THRESHOLD
+            let tiltLow = abs(lastTiltValue) < TILT_THRESHOLD_RAD * 0.1 // Rất phẳng (ví dụ: < 7 độ)
+            let oscillationLow = lastOscillationValue < OSCILLATION_THRESHOLD // Rất ổn định (dao động thấp)
 
             if tiltLow && oscillationLow {
-                let alarmMessage = "MỞ KHÓA & ỔN ĐỊNH VI PHẠM!\n" +
+                // ĐIỀU KIỆN CẢNH BÁO VI PHẠM!
+                let alarmMessage = "CẢNH BÁO: MỞ KHÓA & ỔN ĐỊNH VI PHẠM!\n" +
                                    "Roll: \(lastTiltValue.to3Decimal()) rad\n" +
                                    "Oscillation: \(lastOscillationValue.to5Decimal()) rad"
 
@@ -242,7 +240,7 @@ class UnlockMonitor: NSObject, FlutterStreamHandler, CLLocationManagerDelegate {
     private func sendEvent(type: String, message: String, location: String? = nil) {
         guard let sink = eventSink else { return }
 
-        // SỬA LỖI: Đảm bảo timestamp là Double (mili giây)
+        // Đảm bảo timestamp là Double (mili giây)
         let timestamp = Date().timeIntervalSince1970 * 1000.0
 
         let eventData: [String: Any] = [
