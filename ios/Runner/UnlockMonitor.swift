@@ -1,301 +1,334 @@
 import Foundation
-import CoreMotion
-import CoreLocation
 import Flutter
-import UserNotifications
+import CoreLocation
+import CoreMotion
+import UIKit
 
-// Định nghĩa thông báo Darwin Notification cho sự kiện mở khóa thiết bị
-let kScreenLockStateNotification = "com.apple.springboard.lockstate"
+// MARK: - Constants and Structs
 
-// --- HẰNG SỐ KIỂM TRA ĐỘ ỔN ĐỊNH VÀ NGHIÊNG (ĐÃ CẬP NHẬT THEO YÊU CẦU) ---
-let TILT_THRESHOLD: Double = 1.2217 // 70 degrees in radians (70 * pi/180)
-let OSCILLATION_LIMIT: Double = 0.026 // ~1.5 degrees in radians 
+// Định nghĩa tên kênh Flutter
+let eventChannelName = "com.example.app/monitor_events"
+let methodChannelName = "com.example.app/background_service"
 
-let TILT_UPDATE_INTERVAL = 0.02 // 50 Hz (20ms)
-let TILT_BUFFER_SIZE = 250 // 250 samples * 0.02s = 5 giây dữ liệu
+// Ngưỡng nghiêng (độ) - Khoảng 70 độ.
+let TILT_THRESHOLD_DEGREE: Double = 70.0
+let TILT_THRESHOLD_RAD: Double = TILT_THRESHOLD_DEGREE * .pi / 180.0
 
-// --- Mô hình Dữ liệu Sự kiện ---
-struct MonitorEvent: Codable {
-    let type: String // 'LOCK_EVENT', 'TILT_EVENT', 'UNLOCK_EVENT', 'ALARM_EVENT'
-    let message: String
-    let location: String?
-    let tiltValue: Double? // Giá trị làm mịn 5s (tilt trung bình)
-    let oscillationValue: Double? // Giá trị dao động (độ sai lệch Z/Roll)
-    let timestamp: Double // FIX: Đã đổi từ Int sang Double để tránh lỗi chuyển đổi
-    
-    var jsonString: String {
-        let encoder = JSONEncoder()
-        // Bỏ qua outputFormatting; mặc định đã là compact.
-        if let data = try? encoder.encode(self), let json = String(data: data, encoding: .utf8) {
-            return json
-        }
-        return "{}"
-    }
-}
+// Ngưỡng dao động (độ ổn định) - Giá trị nhỏ hơn nghĩa là ổn định hơn.
+let OSCILLATION_THRESHOLD: Double = 0.005 
 
-// --- Lớp Quản lý Logic iOS (Singleton) ---
-class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
-    
-    static let shared = UnlockMonitor()
-    
-    // --- Flutter Communication ---
+// MARK: - Unlock Monitor Class
+
+class UnlockMonitor: NSObject, FlutterStreamHandler, CLLocationManagerDelegate {
+
+    // Flutter Channel
     private var eventSink: FlutterEventSink?
     
-    // Core Services
-    private let motionManager = CMMotionManager()
-    private let locationManager = CLLocationManager()
+    // Core Motion
+    private var motionManager = CMMotionManager()
+    private var tiltTimer: Timer?
+    private var isMonitoringTilt = false
     
-    // State Variables
-    private var latestLockState = "UNKNOWN"
-    private var isLocationMonitoringActive = false
-    private var isTiltMonitoringActive = false
+    // Core Location
+    private var locationManager = CLLocationManager()
+    private var lastLocation: CLLocation?
+    private var locationTimer: Timer?
+    
+    // Device State
+    private var isScreenLocked = true
+    private var isDeviceStable = false
 
-    // --- TRẠNG THÁI TILT MỚI ---
-    private var tiltBuffer: [Double] = [] // Buffer lưu Roll Angle
-    private var tiltMonitorTimer: Timer?
-    private var smoothedRollAngle: Double = 0.0
-    private var oscillationValue: Double = 0.0
-    
-    private override init() {
+    // Tilt Data Tracking
+    private var tiltHistory: [Double] = []
+    private let tiltHistoryCapacity = 10 // Lưu 10 mẫu (0.5 giây)
+    private var lastTiltValue: Double = 0.0
+    private var lastOscillationValue: Double = 0.0
+
+    override init() {
         super.init()
-        locationManager.delegate = self
-        
-        // FIX LỖI: Sử dụng .best thay vì .bestForNavigation để đảm bảo tương thích
-        locationManager.desiredAccuracy = .best 
-        
-        locationManager.requestAlwaysAuthorization()
-        
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            print("Quyền thông báo được cấp: \(granted)")
-        }
+        setupNotificationObservers()
+        setupLocationManager()
     }
     
-    // --- FlutterStreamHandler Implementation ---
+    // MARK: - FlutterStreamHandler Implementation
     
+    // Lắng nghe bắt đầu stream (từ Dart)
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         self.eventSink = events
-        print("[Monitor] Flutter bắt đầu lắng nghe. Khởi động các bộ theo dõi.")
-        startMonitoring()
+        // Gửi trạng thái hiện tại ngay khi kết nối
+        sendEvent(type: "LOCK_EVENT", message: isScreenLocked ? "Thiết bị Khóa (Khởi tạo)" : "Thiết bị Mở Khóa (Khởi tạo)")
         return nil
     }
-
+    
+    // Lắng nghe hủy stream (từ Dart)
     func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        print("[Monitor] Flutter dừng lắng nghe. Dừng các bộ theo dõi.")
-        stopMonitoring()
         eventSink = nil
         return nil
     }
-    
-    // Phương thức này được AppDelegate gọi
-    func setupEventChannel(binaryMessenger: FlutterBinaryMessenger) {
-        let eventChannel = FlutterEventChannel(name: "com.example.app/monitor_events", binaryMessenger: binaryMessenger)
-        eventChannel.setStreamHandler(self)
+
+    // MARK: - Setup and Lifecycle
+
+    // Cấu hình CLLocationManager
+    private func setupLocationManager() {
+        locationManager.delegate = self
+        // FIX LỖI 1: Thay .best bằng hằng số kCLLocationAccuracyBest
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest 
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.pausesLocationUpdatesAutomatically = false
     }
 
-    func startMonitoring() {
-        startDarwinNotificationMonitoring()
-        startLocationMonitoring()
+    // Thiết lập lắng nghe thông báo Lock/Unlock của thiết bị
+    private func setupNotificationObservers() {
+        NotificationCenter.default.addObserver(self, 
+            selector: #selector(didLock), 
+            name: UIScreen.didWakeNotification, 
+            object: nil
+        )
+        NotificationCenter.default.addObserver(self, 
+            selector: #selector(didUnlock), 
+            name: UIScreen.didUnaugmentNotification, // Dùng thay thế cho .unlocked (thường là khi unaugment, hay mở khóa)
+            object: nil
+        )
+        NotificationCenter.default.addObserver(self, 
+            selector: #selector(didLock), 
+            name: UIApplication.didEnterBackgroundNotification, 
+            object: nil
+        )
+    }
+    
+    // MARK: - Background Service Control
+
+    // Bắt đầu service nền (được gọi qua MethodChannel)
+    @objc func startMonitoring() {
+        // Yêu cầu quyền truy cập Vị trí
+        locationManager.requestWhenInUseAuthorization()
+        locationManager.requestAlwaysAuthorization()
+
+        // Bắt đầu cập nhật vị trí
+        locationManager.startUpdatingLocation()
+        startLocationTimer()
+        
+        // Bắt đầu theo dõi Nghiêng
         startTiltMonitoring()
     }
     
-    func stopMonitoring() {
-        stopLocationMonitoring()
-        stopTiltMonitoring()
-        tiltMonitorTimer?.invalidate()
-        tiltMonitorTimer = nil
-    }
-    
-    // --- 1. Darwin Notification (Lock/Unlock State) ---
-    private func startDarwinNotificationMonitoring() {
-        if latestLockState != "UNKNOWN" { return }
-        
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        CFNotificationCenterAddObserver(
-            center,
-            nil,
-            { (_, observer, name, _, _) in
-                if let name = name?.rawValue as String?, name == kScreenLockStateNotification {
-                    DispatchQueue.main.async {
-                        UnlockMonitor.shared.handleLockStateChange()
-                    }
-                }
-            } as CFNotificationCallback,
-            kScreenLockStateNotification as CFString,
-            nil,
-            .deliverImmediately
-        )
-        print("[LockState] Bắt đầu lắng nghe Darwin Notification.")
-        
-        // Gọi để kiểm tra trạng thái khóa ban đầu ngay sau khi thiết lập lắng nghe
-        handleLockStateChange()
-    }
-    
-    // Hàm xử lý sự kiện Lock/Unlock (Bao gồm logic cảnh báo đã cập nhật)
-    private func handleLockStateChange() {
-        
-        // Thay thế hàm C private bằng API công khai của Swift để kiểm tra Protected Data
-        let isProtectedDataAvailable = UIApplication.shared.isProtectedDataAvailable
-        let currentState = isProtectedDataAvailable ? "UNLOCKED" : "LOCKED"
-        
-        if currentState != latestLockState || latestLockState == "UNKNOWN" {
-            latestLockState = currentState
-            
-            let eventType: String
-            var message: String
-            
-            let rollForCheck = self.smoothedRollAngle // Góc nghiêng TRUNG BÌNH 5s
-            let isOscillating = self.oscillationValue > OSCILLATION_LIMIT 
-            
-            if currentState == "UNLOCKED" {
-                // LOGIC CẢNH BÁO MỚI:
-                // Kích hoạt khi: Mở Khóa + Góc Nghiêng TRUNG BÌNH > 70° + Ổn Định (Dao động <= 1.5°)
-                if abs(rollForCheck) > TILT_THRESHOLD && !isOscillating {
-                    // CẢNH BÁO BỊ KÍCH HOẠT!
-                    eventType = "ALARM_EVENT"
-                    let angleDeg = rollForCheck * 180 / Double.pi
-                    let oscillationDeg = oscillationValue * 180 / Double.pi
-                    
-                    message = "CẢNH BÁO: Mở Khóa + Nghiêng TB 5s > 70° (\(String(format: "%.1f", angleDeg))°) VÀ Ổn định (Dao động: \(String(format: "%.2f", oscillationDeg))° < 1.5°)."
-                    
-                    self.sendLocalNotification(title: "CẢNH BÁO KHẨN CẤP", body: message)
-                    
-                } else {
-                    // Mở Khóa BÌNH THƯỜNG
-                    eventType = "UNLOCK_EVENT"
-                    message = "Thiết bị đã Mở Khóa."
-                }
-            } else {
-                // Sự kiện Khóa
-                eventType = "LOCK_EVENT"
-                message = "Thiết bị đã Khóa."
-            }
-            
-            print("[\(eventType)] Trạng thái mới: \(message)")
-            
-            // Gửi sự kiện về Flutter
-            let event = MonitorEvent(
-                type: eventType,
-                message: message,
-                location: self.getLatestLocationString(), 
-                tiltValue: self.smoothedRollAngle, 
-                oscillationValue: self.oscillationValue, 
-                // FIX LỖI: Loại bỏ Int() cast, sử dụng Double
-                timestamp: Date().timeIntervalSince1970 * 1000.0
-            )
-            self.eventSink?(event.jsonString)
-        }
-    }
-    
-    private func sendLocalNotification(title: String, body: String) {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = UNNotificationSound.default
-        content.badge = 1
-
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("Lỗi gửi thông báo: \(error.localizedDescription)")
-            }
-        }
-    }
-    
-    // --- 2. Core Location ---
-    private func startLocationMonitoring() {
-        if isLocationMonitoringActive { return }
-        locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.showsBackgroundLocationIndicator = true
-        locationManager.startUpdatingLocation()
-        isLocationMonitoringActive = true
-        print("[Location] Bắt đầu theo dõi vị trí liên tục.")
-    }
-    
-    private func stopLocationMonitoring() {
-        if !isLocationMonitoringActive { return }
+    // Dừng service nền (được gọi qua MethodChannel)
+    @objc func stopMonitoring() {
         locationManager.stopUpdatingLocation()
-        isLocationMonitoringActive = false
-        print("[Location] Đã dừng theo dõi vị trí.")
+        stopLocationTimer()
+        stopTiltMonitoring()
+    }
+
+    // MARK: - Location Monitoring
+    
+    private func startLocationTimer() {
+        // Cập nhật vị trí mỗi 15 giây
+        locationTimer?.invalidate()
+        locationTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            self?.sendCurrentLocation()
+        }
+        locationTimer?.fire()
     }
     
-    private func getLatestLocationString() -> String? {
-        guard let location = locationManager.location else { return "Không thể lấy vị trí" }
-        let lat = String(format: "%.6f", location.coordinate.latitude)
-        let lon = String(format: "%.6f", location.coordinate.longitude)
-        let alt = String(format: "%.1f", location.altitude)
-        let speed = String(format: "%.1f", location.speed)
-        return "Lat: \(lat), Lon: \(lon), Alt: \(alt)m, Speed: \(speed) m/s"
+    private func stopLocationTimer() {
+        locationTimer?.invalidate()
+        locationTimer = nil
     }
-    
+
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        // Chỉ giữ vị trí mới nhất
-    }
-
-    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        print("[Location] Lỗi vị trí: \(error.localizedDescription)")
-    }
-
-    // --- 3. Core Motion (Theo dõi Nghiêng/Tilt) ---
-    private func startTiltMonitoring() {
-        if isTiltMonitoringActive { return }
-        guard motionManager.isDeviceMotionAvailable else {
-            print("[Tilt] Lỗi: Cảm biến chuyển động (Device Motion) không khả dụng.")
-            return
-        }
-        
-        motionManager.deviceMotionUpdateInterval = TILT_UPDATE_INTERVAL
-        
-        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] (motion, error) in
-            guard let self = self, let attitude = motion?.attitude else { return }
-            
-            // 1. Cập nhật buffer
-            self.tiltBuffer.append(attitude.roll)
-            if self.tiltBuffer.count > TILT_BUFFER_SIZE {
-                self.tiltBuffer.removeFirst()
-            }
-        }
-        
-        // 2. Thiết lập Timer để tính toán Trung bình 5s và Dao động (gửi sự kiện 10 lần/giây)
-        tiltMonitorTimer = Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: #selector(processAndSendTiltData), userInfo: nil, repeats: true)
-        RunLoop.main.add(tiltMonitorTimer!, forMode: .common)
-        
-        isTiltMonitoringActive = true
-        print("[Tilt] Bắt đầu theo dõi nghiêng và tính trung bình \(TILT_BUFFER_SIZE) mẫu (\(TILT_BUFFER_SIZE * TILT_UPDATE_INTERVAL) giây).")
+        guard let location = locations.last else { return }
+        lastLocation = location
     }
     
-    @objc private func processAndSendTiltData() {
-        guard self.eventSink != nil, !tiltBuffer.isEmpty else { return }
+    private func sendCurrentLocation() {
+        guard let location = lastLocation else { return }
 
-        // 1. Tính toán Trung bình 5s (Smoothed Roll - tilt trung bình)
-        let sum = tiltBuffer.reduce(0, +)
-        self.smoothedRollAngle = sum / Double(tiltBuffer.count)
+        let lat = location.coordinate.latitude
+        let lon = location.coordinate.longitude
+        let locationString = "Lat: \(lat.to6Decimal()), Lon: \(lon.to6Decimal())"
         
-        // 2. Tính toán Độ dao động (Oscillation: Max - Min Roll Angle - độ sai lệch Z)
-        if let min = tiltBuffer.min(), let max = tiltBuffer.max() {
-            self.oscillationValue = max - min
+        // Gửi sự kiện vị trí nếu có sự kiện lock/unlock xảy ra
+        // Ở đây chỉ lưu trữ, việc gửi gắn liền với Lock/Unlock
+    }
+    
+    // MARK: - Tilt Monitoring (CoreMotion)
+    
+    private func startTiltMonitoring() {
+        guard !isMonitoringTilt else { return }
+        isMonitoringTilt = true
+        
+        if motionManager.isDeviceMotionAvailable {
+            motionManager.deviceMotionUpdateInterval = 0.05 // 50ms
+            motionManager.startDeviceMotionUpdates(using: .xArbitraryZAxisAttitude) { [weak self] (motion, error) in
+                guard let self = self, let motion = motion else { return }
+                
+                // Roll (nghiêng quanh trục X) là góc nghiêng phổ biến nhất
+                let rollAngle = motion.attitude.roll 
+                self.processTiltData(rollAngle: rollAngle)
+                
+                // Luôn kiểm tra cảnh báo sau khi nhận dữ liệu nghiêng mới
+                self.checkAlarmConditions()
+            }
         } else {
-            self.oscillationValue = 0.0
+            print("Device Motion not available.")
         }
-        
-        // Gửi dữ liệu nghiêng ĐÃ LÀM MỊN và độ dao động về Flutter
-        let event = MonitorEvent(
-            type: "TILT_EVENT",
-            message: "Roll Angle (5s Avg)",
-            location: nil,
-            tiltValue: self.smoothedRollAngle,
-            oscillationValue: self.oscillationValue,
-            // FIX LỖI: Loại bỏ Int() cast, sử dụng Double
-            timestamp: Date().timeIntervalSince1970 * 1000.0
-        )
-        self.eventSink?(event.jsonString)
     }
     
     private func stopTiltMonitoring() {
-        if !isTiltMonitoringActive { return }
         motionManager.stopDeviceMotionUpdates()
-        tiltMonitorTimer?.invalidate()
-        tiltMonitorTimer = nil
-        isTiltMonitoringActive = false
-        print("[Tilt] Đã dừng theo dõi nghiêng.")
+        isMonitoringTilt = false
+    }
+    
+    private func processTiltData(rollAngle: Double) {
+        // 1. Cập nhật lịch sử nghiêng
+        tiltHistory.append(rollAngle)
+        if tiltHistory.count > tiltHistoryCapacity {
+            tiltHistory.removeFirst()
+        }
+        
+        // 2. Tính toán giá trị Nghiêng (Trung bình 500ms)
+        let averageTilt = tiltHistory.reduce(0, +) / Double(tiltHistory.count)
+        
+        // 3. Tính toán Độ Dao Động (Ổn định) - Độ lệch chuẩn
+        let mean = averageTilt
+        let sumOfSquaredDifferences = tiltHistory.reduce(0) { $0 + pow($1 - mean, 2) }
+        let variance = sumOfSquaredDifferences / Double(tiltHistory.count)
+        let oscillation = sqrt(variance) // Độ lệch chuẩn là độ dao động
+
+        lastTiltValue = averageTilt
+        lastOscillationValue = oscillation
+
+        // 4. Gửi sự kiện Tilt cứ mỗi 500ms (10 mẫu)
+        if tiltHistory.count == tiltHistoryCapacity {
+            let message: String
+            if abs(averageTilt) < TILT_THRESHOLD_RAD * 0.1 {
+                 message = "Thiết bị rất Phẳng và Ổn Định."
+            } else if abs(averageTilt) < TILT_THRESHOLD_RAD {
+                message = "Thiết bị đang Nghiêng nhẹ."
+            } else {
+                message = "Thiết bị Nghiêng quá Ngưỡng!"
+            }
+            
+            sendTiltEvent(tiltValue: averageTilt, oscillationValue: oscillation, message: message)
+        }
+    }
+
+    // MARK: - State Management
+
+    @objc private func didLock() {
+        guard !isScreenLocked else { return }
+        isScreenLocked = true
+        
+        // Đảm bảo không gửi ALARM ngay lập tức khi Lock
+        // Dừng theo dõi nghiêng tạm thời hoặc reset trạng thái cảnh báo
+        isDeviceStable = false
+        
+        sendEvent(type: "LOCK_EVENT", message: "Thiết bị đã Khóa.", location: lastLocation?.toLocationString())
+    }
+
+    @objc private func didUnlock() {
+        guard isScreenLocked else { return }
+        isScreenLocked = false
+        
+        sendEvent(type: "UNLOCK_EVENT", message: "Thiết bị đã Mở Khóa.", location: lastLocation?.toLocationString())
+        
+        // Việc mở khóa là điều kiện tiên quyết cho ALARM, không phải ALARM.
+        // Cảnh báo sẽ được kiểm tra sau khi có dữ liệu nghiêng mới.
+    }
+    
+    // MARK: - Alarm Logic
+
+    private func checkAlarmConditions() {
+        guard isMonitoringTilt else { return }
+
+        // Điều kiện BẤT THƯỜNG (ALARM):
+        // 1. Thiết bị đang ở trạng thái MỞ KHÓA
+        // 2. Thiết bị RẤT PHẲNG (góc nghiêng thấp)
+        // 3. Thiết bị RẤT ỔN ĐỊNH (dao động thấp)
+        
+        if !isScreenLocked {
+            let tiltLow = abs(lastTiltValue) < TILT_THRESHOLD_RAD * 0.1 // Rất phẳng (dưới 7 độ)
+            let oscillationLow = lastOscillationValue < OSCILLATION_THRESHOLD // Rất ổn định (độ dao động thấp)
+
+            if tiltLow && oscillationLow {
+                // VI PHẠM: Thiết bị mở khóa, phẳng và ổn định.
+                let alarmMessage = "MỞ KHÓA & ỔN ĐỊNH VI PHẠM!\n" +
+                                   "Roll: \(lastTiltValue.to3Decimal()) rad\n" +
+                                   "Oscillation: \(lastOscillationValue.to5Decimal()) rad"
+                                   
+                sendEvent(type: "ALARM_EVENT", message: alarmMessage, location: lastLocation?.toLocationString())
+            } 
+        }
+        // Ghi chú: Nếu màn hình Khóa, không bao giờ phát ALARM.
+    }
+
+    // MARK: - Event Sending
+
+    // Gửi sự kiện Lock/Unlock/Alarm
+    private func sendEvent(type: String, message: String, location: String? = nil) {
+        guard let sink = eventSink else { return }
+        
+        // FIX LỖI 2: Đảm bảo timestamp là Double (mili giây)
+        let timestamp = Date().timeIntervalSince1970 * 1000.0
+
+        let eventData: [String: Any] = [
+            "type": type,
+            "message": message,
+            "location": location as Any,
+            "timestamp": timestamp // Double
+        ]
+        
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: eventData, options: [])
+            let jsonString = String(data: jsonData, encoding: .utf8)
+            sink(jsonString)
+        } catch {
+            print("Error serializing JSON for event: \(error)")
+        }
+    }
+    
+    // Gửi sự kiện Tilt
+    private func sendTiltEvent(tiltValue: Double, oscillationValue: Double, message: String) {
+        guard let sink = eventSink else { return }
+
+        let timestamp = Date().timeIntervalSince1970 * 1000.0
+
+        let eventData: [String: Any] = [
+            "type": "TILT_EVENT",
+            "message": message,
+            "tiltValue": tiltValue,
+            "oscillationValue": oscillationValue,
+            "timestamp": timestamp
+        ]
+        
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: eventData, options: [])
+            let jsonString = String(data: jsonData, encoding: .utf8)
+            sink(jsonString)
+        } catch {
+            print("Error serializing JSON for tilt event: \(error)")
+        }
+    }
+}
+
+// MARK: - Extensions
+
+extension CLLocation {
+    func toLocationString() -> String {
+        let lat = self.coordinate.latitude.to6Decimal()
+        let lon = self.coordinate.longitude.to6Decimal()
+        return "Lat: \(lat), Lon: \(lon)"
+    }
+}
+
+extension Double {
+    func to3Decimal() -> String {
+        return String(format: "%.3f", self)
+    }
+    func to5Decimal() -> String {
+        return String(format: "%.5f", self)
+    }
+    func to6Decimal() -> String {
+        return String(format: "%.6f", self)
     }
 }
