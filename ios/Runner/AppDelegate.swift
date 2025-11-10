@@ -21,6 +21,8 @@ class AppDelegate: FlutterAppDelegate {
         
         // Setup Flutter View Controller
         guard let controller = window?.rootViewController as? FlutterViewController else {
+            // Ghi log lỗi nếu không tìm thấy controller
+            print("Lỗi: Không thể tìm thấy FlutterViewController làm root.")
             return super.application(application, didFinishLaunchingWithOptions: launchOptions)
         }
         

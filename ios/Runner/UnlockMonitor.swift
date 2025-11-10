@@ -147,7 +147,7 @@ class UnlockMonitor: NSObject, FlutterStreamHandler, CLLocationManagerDelegate {
         if motionManager.isDeviceMotionAvailable {
             motionManager.deviceMotionUpdateInterval = 0.05 // 50ms
 
-            // KHẮC PHỤC LỖI: Sử dụng CMAttitudeReferenceFrame.xArbitraryCorrectedZAxis 
+            // **KHẮC PHỤC LỖI:** Thay thế .xArbitraryZAxis bằng CMAttitudeReferenceFrame.xArbitraryCorrectedZAxis
             motionManager.startDeviceMotionUpdates(
                 using: .xArbitraryCorrectedZAxis, 
                 to: OperationQueue.main
