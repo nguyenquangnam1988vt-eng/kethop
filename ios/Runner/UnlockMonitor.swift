@@ -21,11 +21,10 @@ struct MonitorEvent: Codable {
     let location: String?
     let tiltValue: Double? // Giá trị làm mịn 5s (tilt trung bình)
     let oscillationValue: Double? // Giá trị dao động (độ sai lệch Z/Roll)
-    let timestamp: Int
+    let timestamp: Double // FIX: Đã đổi từ Int sang Double để tránh lỗi chuyển đổi
     
     var jsonString: String {
         let encoder = JSONEncoder()
-        // Đã sửa lỗi: 'Type 'JSONEncoder.OutputFormatting' has no member 'compact''. 
         // Bỏ qua outputFormatting; mặc định đã là compact.
         if let data = try? encoder.encode(self), let json = String(data: data, encoding: .utf8) {
             return json
@@ -61,9 +60,8 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
         super.init()
         locationManager.delegate = self
         
-        // Đã sửa lỗi: Cannot find 'kCLLOCATIONAccuracyBestForNavigation' in scope
-        // Dùng enum case của Swift thay vì hằng số C
-        locationManager.desiredAccuracy = .bestForNavigation 
+        // FIX LỖI: Sử dụng .best thay vì .bestForNavigation để đảm bảo tương thích
+        locationManager.desiredAccuracy = .best 
         
         locationManager.requestAlwaysAuthorization()
         
@@ -135,7 +133,6 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
     // Hàm xử lý sự kiện Lock/Unlock (Bao gồm logic cảnh báo đã cập nhật)
     private func handleLockStateChange() {
         
-        // Đã sửa lỗi: Cannot find 'CFNotificationCenterGetState' in scope
         // Thay thế hàm C private bằng API công khai của Swift để kiểm tra Protected Data
         let isProtectedDataAvailable = UIApplication.shared.isProtectedDataAvailable
         let currentState = isProtectedDataAvailable ? "UNLOCKED" : "LOCKED"
@@ -182,7 +179,8 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
                 location: self.getLatestLocationString(), 
                 tiltValue: self.smoothedRollAngle, 
                 oscillationValue: self.oscillationValue, 
-                timestamp: Int(Date().timeIntervalSince1970 * 1000)
+                // FIX LỖI: Loại bỏ Int() cast, sử dụng Double
+                timestamp: Date().timeIntervalSince1970 * 1000.0
             )
             self.eventSink?(event.jsonString)
         }
@@ -286,7 +284,8 @@ class UnlockMonitor: NSObject, CLLocationManagerDelegate, FlutterStreamHandler {
             location: nil,
             tiltValue: self.smoothedRollAngle,
             oscillationValue: self.oscillationValue,
-            timestamp: Int(Date().timeIntervalSince1970 * 1000)
+            // FIX LỖI: Loại bỏ Int() cast, sử dụng Double
+            timestamp: Date().timeIntervalSince1970 * 1000.0
         )
         self.eventSink?(event.jsonString)
     }
