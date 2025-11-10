@@ -1,32 +1,43 @@
 import UIKit
 import Flutter
-import CoreLocation 
-import CoreMotion 
 
 @UIApplicationMain
-class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate {
+  override func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+  ) -> Bool {
+    GeneratedPluginRegistrant.register(with: self)
     
-    // Sử dụng Singleton đã được khởi tạo
-    private let monitor = UnlockMonitor.shared
+    // --- KHỞI TẠO VÀ CẤU HÌNH CHANNELS ---
     
-    override func application(
-        _ application: UIApplication,
-        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
-    ) -> Bool {
-        
-        // BƯỚC 1: Đăng ký các plugin của Flutter
-        GeneratedPluginRegistrant.register(with: self)
-        
-        // BƯỚC 2: Khởi tạo và Thiết lập Kênh Truyền thông cho UnlockMonitor
-        if let controller = window?.rootViewController as? FlutterViewController {
-            // Đã sửa lỗi: Tên phương thức phải là setupEventChannel
-            monitor.setupEventChannel(binaryMessenger: controller.binaryMessenger)
-        }
-        
-        // BƯỚC 3: Loại bỏ monitor.startMonitoring()
-        // Việc giám sát (monitoring) sẽ tự động bắt đầu khi Flutter gọi monitor.onListen()
-        
-        // BƯỚC 4: Trả về kết quả
-        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    guard let controller = window?.rootViewController as? FlutterViewController else {
+        fatalError("rootViewController is not FlutterViewController")
     }
+    
+    // 1. Khởi tạo UnlockMonitor (không dùng .shared)
+    let monitor = UnlockMonitor()
+    
+    // 2. Cấu hình MethodChannel
+    let methodChannel = FlutterMethodChannel(name: methodChannelName, binaryMessenger: controller.binaryMessenger)
+    methodChannel.setMethodCallHandler { (call: FlutterMethodCall, result: @escaping FlutterResult) in
+        if call.method == "startBackgroundService" {
+            monitor.startMonitoring()
+            result(nil)
+        } else if call.method == "stopBackgroundService" {
+            monitor.stopMonitoring()
+            result(nil)
+        } else {
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    
+    // 3. Cấu hình EventChannel
+    let eventChannel = FlutterEventChannel(name: eventChannelName, binaryMessenger: controller.binaryMessenger)
+    eventChannel.setStreamHandler(monitor) // Đặt monitor làm handler cho stream
+    
+    // ----------------------------------------
+
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
 }
